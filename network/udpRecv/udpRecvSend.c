@@ -41,6 +41,9 @@ static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
 static void ifIndex_init (struct rte_mempool * mbuf_pool)
 {
     // 检查可用网卡数量
+    // 1.检测端口是否合法
+    // 绑定了多少个网卡绑定了PCIE IGB VFIO啥的
+    // 获取默认网卡信息，还没有添加DPDK信息
     uint16_t ifIndex_ports = rte_eth_dev_count_avail();
     if (ifIndex_ports == 0)
     {
@@ -51,7 +54,7 @@ static void ifIndex_init (struct rte_mempool * mbuf_pool)
     struct rte_eth_dev_info dev_info;
     rte_eth_dev_info_get(g_dpdk_ifIndex, &dev_info);
 
-    // DPDK配置网卡
+    // 2.添加DPDK基本信息
     // 设置发送接收队列
     const int num_rx_queues = 1;
     const int num_tx_queues = 1;
@@ -69,7 +72,10 @@ static void ifIndex_init (struct rte_mempool * mbuf_pool)
     // 配置发送队列
     ret = -1;
     struct rte_eth_txconf txq_conf = dev_info.default_txconf;
+    // tx队列的负载，接受和发送同步
     txq_conf.offloads = ifIndex_config.rxmode.offloads;
+    // 网口，队列，队列最大包负载，socketid，配置信息
+    // 512 < n < 4096
     ret = rte_eth_tx_queue_setup(g_dpdk_ifIndex, 0, 1024, rte_eth_dev_socket_id(g_dpdk_ifIndex),&txq_conf);
     if (ret < 0)
     {
@@ -92,30 +98,42 @@ static void ifIndex_init (struct rte_mempool * mbuf_pool)
     //rte_eth_macaddr_get(g_dpdk_ifIndex, &addr_mac);
 
     //开启网卡混杂模式
-    rte_eth_promiscuous_get(g_dpdk_ifIndex);
+    //rte_eth_promiscuous_get(g_dpdk_ifIndex);
 
 
 }   
 
 
 // UDP数据包构建
+// msg，需要发送的数据，数据的长度
 static int build_udp_packet(uint8_t *msg, unsigned char* data, uint16_t total_len)
 {
+    // 主要作用 打包成一个UDP的数据包
     // 构建以太网头
+    // 两个字节以上，都转换
     struct rte_ether_hdr *ethhdr = (struct rte_ether_hdr*)msg;
+    // 源IP地址
     rte_memcpy(ethhdr->s_addr.addr_bytes, g_src_mac, RTE_ETHER_ADDR_LEN);
+    // 目的IP地址
     rte_memcpy(ethhdr->d_addr.addr_bytes, g_dst_mac, RTE_ETHER_ADDR_LEN);
     ethhdr->ether_type = htons(RTE_ETHER_TYPE_IPV4);
 
 
     // 构建IP头
     struct rte_ipv4_hdr *iphdr = (struct rte_ipv4_hdr *)(msg + sizeof(struct rte_ether_hdr));
+    // 4位版本，4位包长度
     iphdr->version_ihl = 0x45;
+    // IP里面的类型 TOS服务类型
     iphdr->type_of_service = 0;
+    // 数据包总长度
     iphdr->total_length = htons(total_len - sizeof(struct rte_ether_hdr));
+    // 16位标识
     iphdr->packet_id = 0;
+    // 偏移量
     iphdr->fragment_offset = 0;
+    // 最大生存时间TTL
     iphdr->time_to_live = 64;
+    // 8位IP协议
     iphdr->next_proto_id = IPPROTO_UDP;
     iphdr->src_addr = g_src_ip;
     iphdr->dst_addr = g_dst_ip;
@@ -130,16 +148,17 @@ static int build_udp_packet(uint8_t *msg, unsigned char* data, uint16_t total_le
     udphdr->dgram_len = htons(udplen);
 
     // 将数据拷贝到数据区
+    // 指针跳过UDP头
     rte_memcpy((uint8_t*)(udphdr+1),data,udplen);
     udphdr->dgram_cksum = 0;
     udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(iphdr,udphdr);
 
     struct in_addr addr;
 	addr.s_addr = g_src_ip;
-	printf(" --> src: %s:%d, ", inet_ntoa(addr), ntohs(g_src_ip));
+	printf(" --> src: %s:%d\n", inet_ntoa(addr), ntohs(g_src_port));
 
 	addr.s_addr = g_dst_ip;
-	printf("dst: %s:%d\n", inet_ntoa(addr), ntohs(g_dst_ip));
+	printf(" --> dst: %s:%d\n", inet_ntoa(addr), ntohs(g_dst_port));
 
 	return 0;
 
@@ -147,10 +166,18 @@ static int build_udp_packet(uint8_t *msg, unsigned char* data, uint16_t total_le
 }
 
 // 发送数据
+// 内存池，数据，长度
 static struct rte_mbuf* send_udp_pack(struct rte_mempool *mbuf_pool, uint8_t* data, uint16_t length)
 {
     //mempool -> mbuf
+    // 主要作用
+    // 从内存池中获取了mbuf
 
+    // DPDK所有的内存都是从内存池获取的，每次都是在内存池拿取。
+    // 每次最小的一个单位就是mbuf
+
+    // 14Byte以太网头，20字节IP头，8字节UDP头 应用数据
+    // 14 + 20 + 8 =42
     const unsigned total_len = length + 42;
     struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mbuf_pool);
     if (!mbuf)
@@ -158,10 +185,14 @@ static struct rte_mbuf* send_udp_pack(struct rte_mempool *mbuf_pool, uint8_t* da
         rte_exit(EXIT_FAILURE, "Error with sendUDP Queue");
     }
 
+    // 为了DPDK数据协议的处理
     mbuf->pkt_len = total_len;
     mbuf->data_len = total_len;
 
+    // 拿到内存池中mbuf指针，指向的具体位置
     uint8_t* pktdata = rte_pktmbuf_mtod(mbuf, uint8_t*);
+    // 拿出了我们的使用位置，然后对这个地方的内存进行处理
+
     build_udp_packet(pktdata, data, total_len);
     return mbuf;
 }
@@ -198,6 +229,7 @@ int main(int argc, char* argv[])
 
     // 初始化网卡,启动DPDK
     ifIndex_init(mbuf_pool);
+    rte_eth_macaddr_get(g_dpdk_ifIndex,(struct rte_ether_addr* )g_src_mac);
 
     // 网络收发流程
     while (1)
@@ -233,14 +265,13 @@ int main(int argc, char* argv[])
                 struct rte_udp_hdr *udphdr = (struct rte_udp_hdr*)(iphdr + 1);
 
 
-                // 获取发送端数据
-                uint16_t udpPort = 5641;
+                // 获取发送端数据               uint16_t udpPort = 5641;
 
                 rte_memcpy(g_dst_mac, ethhdr->s_addr.addr_bytes,RTE_ETHER_ADDR_LEN);
                 rte_memcpy(&g_src_ip, &iphdr->dst_addr, sizeof(uint32_t));
                 rte_memcpy(&g_dst_ip, &iphdr->src_addr, sizeof(uint32_t));
                 rte_memcpy(&g_src_port, &udphdr->dst_port, sizeof(uint16_t));
-                rte_memcpy(&g_dst_port, &udpPort, sizeof(uint16_t));
+                rte_memcpy(&g_dst_port, &udphdr->src_port, sizeof(uint16_t));
 
 
 
@@ -249,13 +280,14 @@ int main(int argc, char* argv[])
 
                 struct in_addr addr;
                 addr.s_addr = iphdr->src_addr;
-                //printf("send------------------------src :%s:%d\n",inet_ntoa(addr), udphdr->src_port);
+                printf("src :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->src_port));
                 addr.s_addr = iphdr->dst_addr;
-                //printf("send------------------------src :%s:%d\n",inet_ntoa(addr), udphdr->dst_port);
-                //printf ("send------------------------message :%s\n",(char *)(udphdr + 1));
+                printf("dst :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->dst_port));
+                printf ("message :%s\n",(char *)(udphdr + 1));
 
 
                 struct rte_mbuf *txbuf = send_udp_pack(mbuf_pool,(uint8_t *)(udphdr + 1), length);
+                // 从某个网卡，某个队列，发送某个内存，发送一个包
                 rte_eth_tx_burst(g_dpdk_ifIndex,0,&txbuf,1);
                 rte_pktmbuf_free(txbuf);
 
