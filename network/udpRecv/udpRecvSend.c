@@ -8,6 +8,10 @@
 #include <net/ethernet.h>
 
 
+// 计算IP的宏定义
+#define MAKE_IPVE_ADDR(a,b,c,d)(a + (b<<8) + (c<<16) + (d<<24))
+
+
 // 内存池中的块 4K - 1
 #define NUMMBUFS (4096 - 1)
 // 定义缓冲区最多接受的报文数量
@@ -33,7 +37,8 @@ static uint32_t g_dst_ip;
 static uint8_t g_src_mac[RTE_ETHER_ADDR_LEN];
 static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
 
-
+// UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
+static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,101);
 
 
 
@@ -199,6 +204,60 @@ static struct rte_mbuf* send_udp_pack(struct rte_mempool *mbuf_pool, uint8_t* da
 
 
 
+static int build_arp_packet(uint8_t *msg, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
+{
+    // 以太网头
+    struct rte_ether_hdr *ethhdr = (struct rte_ether_hdr*)msg;
+    // 源IP地址
+    rte_memcpy(ethhdr->s_addr.addr_bytes, g_src_mac, RTE_ETHER_ADDR_LEN);
+    // 目的IP地址
+    rte_memcpy(ethhdr->d_addr.addr_bytes, dst_mac, RTE_ETHER_ADDR_LEN);
+    ethhdr->ether_type = htons(RTE_ETHER_TYPE_ARP);
+
+
+    // ARP包
+    struct rte_arp_hdr *arp = (struct rte_arp_hdr*)(ethhdr + 1);
+    // 硬件 字节序转换
+    arp->arp_hardware = htons(1);
+    // 协议类型
+    arp->arp_protocol = htons(RTE_ETHER_TYPE_IPV4);
+    // 硬件地址长度
+    arp->arp_hlen = RTE_ETHER_ADDR_LEN;
+    // 软件地址长度
+    arp->arp_plen = sizeof(uint32_t);
+    // 软件操作长度 (请求1和返回2)
+    arp->arp_opcode = htons(2);
+
+    // 源IP地址
+    rte_memcpy(arp->arp_data.arp_sha.addr_bytes, g_src_mac,RTE_ETHER_ADDR_LEN);
+    // 目的IP地址
+    rte_memcpy(arp->arp_data.arp_tha.addr_bytes, dst_mac,RTE_ETHER_ADDR_LEN);
+    arp->arp_data.arp_sip = src_ip;
+    arp->arp_data.arp_tip = dst_ip;
+
+    return 0;
+}
+
+// ARP本身的功能，接受和发送
+// ARP发起ARP查询,ARP发送ARP响应
+static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
+{
+    // 14字节以太网
+    // 28字节ARP
+
+    const int total_len = sizeof(struct rte_ether_hdr) + sizeof(struct rte_arp_hdr);
+    // 从内存池分配一个buf存储ARP数据包
+    struct rte_mbuf* mbuf = rte_pktmbuf_alloc(mbuf_pool);
+    if (!mbuf)
+    {
+        rte_exit(EXIT_FAILURE, "ARP Create Packet Error");
+    }
+    mbuf->pkt_len = total_len;
+    mbuf->data_len = total_len;
+    uint8_t* pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t*);
+    build_arp_packet(pkt_data,dst_mac,src_ip,dst_ip);
+    return mbuf;
+}
 
 // 程序入口
 int main(int argc, char* argv[])
@@ -252,10 +311,31 @@ int main(int argc, char* argv[])
         {
             // 以太网头
             struct rte_ether_hdr *ethhdr = rte_pktmbuf_mtod(mbufs[index], struct rte_ether_hdr*);
+
+
+            // 处理ARP数据包
+            
+            if (ethhdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP))
+            {
+                // 只处理广播过来和自己有关的数据包，其他人的数据包不处理
+                // 解析出来ARP头
+                struct rte_arp_hdr* arp_hdr = rte_pktmbuf_mtod_offset(mbufs[index], struct rte_arp_hdr*,sizeof(struct rte_ether_hdr));
+                // 比对本身的IP
+                if (arp_hdr->arp_data.arp_tip == g_src_arp_ip)
+                {
+                    struct rte_mbuf* arpbuf = send_arp_pack(mbuf_pool,arp_hdr->arp_data.arp_sha.addr_bytes,arp_hdr->arp_data.arp_tip,arp_hdr->arp_data.arp_sip);
+                    rte_eth_tx_burst(g_dpdk_ifIndex,0,&arpbuf,1);
+                    rte_pktmbuf_free(arpbuf);
+                    rte_pktmbuf_free(mbufs[index]);
+                }
+                continue;
+            }
+
+            
             // 判别非IPV4数据包，不做处理
             if (ethhdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
-            {
-                continue;
+            {   
+                continue; 
             }
             //buf_addr     data_off         useroff
             struct rte_ipv4_hdr* iphdr = rte_pktmbuf_mtod_offset(mbufs[index],struct rte_ipv4_hdr*, sizeof(struct rte_ether_hdr));
