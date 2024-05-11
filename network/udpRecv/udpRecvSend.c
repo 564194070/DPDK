@@ -162,10 +162,10 @@ static int build_udp_packet(uint8_t *msg, unsigned char* data, uint16_t total_le
 
     struct in_addr addr;
 	addr.s_addr = g_src_ip;
-	printf(" --> src: %s:%d\n", inet_ntoa(addr), ntohs(g_src_port));
+	//printf(" --> src: %s:%d\n", inet_ntoa(addr), ntohs(g_src_port));
 
 	addr.s_addr = g_dst_ip;
-	printf(" --> dst: %s:%d\n", inet_ntoa(addr), ntohs(g_dst_port));
+	//printf(" --> dst: %s:%d\n", inet_ntoa(addr), ntohs(g_dst_port));
 
 	return 0;
 
@@ -311,14 +311,25 @@ static int ng_encode_icmp_pkt(uint8_t *msg, uint8_t *dst_mac,
 
 	// 3 icmp 
 	struct rte_icmp_hdr *icmp = (struct rte_icmp_hdr *)(msg + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr));
-	icmp->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
-	icmp->icmp_code = 0;
+	// 类型 
+    //icmp->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
+    icmp->icmp_type = 5;
+
+    // ICMP差错报文的类型
+	//icmp->icmp_code = 0;
+    icmp->icmp_code = 1;
+    // 标识符
 	icmp->icmp_ident = id;
+    // 序列号
 	icmp->icmp_seq_nb = seqnb;
+    
+    uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,31);
 
 	icmp->icmp_cksum = 0;
 	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr));
 
+    uint8_t* gateway = (uint8_t*)(icmp + 1);
+    rte_memcpy(gateway,&g_src_arp_ip,RTE_ETHER_ADDR_LEN);
 	return 0;
 }
 
@@ -326,7 +337,7 @@ static int ng_encode_icmp_pkt(uint8_t *msg, uint8_t *dst_mac,
 static struct rte_mbuf *ng_send_icmp(struct rte_mempool *mbuf_pool, uint8_t *dst_mac,
 		uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
 
-	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr);
+	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) +sizeof(u_int32_t);
 
 	struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mbuf_pool);
 	if (!mbuf) {
@@ -444,10 +455,10 @@ int main(int argc, char* argv[])
 
                 struct in_addr addr;
                 addr.s_addr = iphdr->src_addr;
-                printf("src :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->src_port));
+                //printf("src :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->src_port));
                 addr.s_addr = iphdr->dst_addr;
-                printf("dst :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->dst_port));
-                printf ("message :%s\n",(char *)(udphdr + 1));
+                //printf("dst :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->dst_port));
+                //printf ("message :%s\n",(char *)(udphdr + 1));
 
 
                 struct rte_mbuf *txbuf = send_udp_pack(mbuf_pool,(uint8_t *)(udphdr + 1), length);
