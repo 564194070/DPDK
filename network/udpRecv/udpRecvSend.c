@@ -39,7 +39,12 @@ static uint8_t g_src_mac[RTE_ETHER_ADDR_LEN];
 static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
 
 // UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
+<<<<<<< HEAD
 static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
+=======
+// 172.20.4.33
+static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
+>>>>>>> temp
 
 
 
@@ -161,10 +166,10 @@ static int build_udp_packet(uint8_t *msg, unsigned char* data, uint16_t total_le
 
     struct in_addr addr;
 	addr.s_addr = g_src_ip;
-	printf(" --> src: %s:%d\n", inet_ntoa(addr), ntohs(g_src_port));
+	//printf(" --> src: %s:%d\n", inet_ntoa(addr), ntohs(g_src_port));
 
 	addr.s_addr = g_dst_ip;
-	printf(" --> dst: %s:%d\n", inet_ntoa(addr), ntohs(g_dst_port));
+	//printf(" --> dst: %s:%d\n", inet_ntoa(addr), ntohs(g_dst_port));
 
 	return 0;
 
@@ -262,6 +267,7 @@ static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool, uint8_t* ds
 }
 
 
+<<<<<<< HEAD
 // 收发ICMP数据包
 static struct rte_mbuf* send_icmp_pack(struct rte_mempool* mbuf_pool, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
 {
@@ -272,6 +278,100 @@ static struct rte_mbuf* send_icmp_pack(struct rte_mempool* mbuf_pool, uint8_t* d
 
 
 
+=======
+
+static uint16_t ng_checksum(uint16_t *addr, int count) {
+
+	register long sum = 0;
+
+	while (count > 1) {
+
+		sum += *(unsigned short*)addr++;
+		count -= 2;
+	
+	}
+
+	if (count > 0) {
+		sum += *(unsigned char *)addr;
+	}
+
+	while (sum >> 16) {
+		sum = (sum & 0xffff) + (sum >> 16);
+	}
+
+	return ~sum;
+}
+
+static int ng_encode_icmp_pkt(uint8_t *msg, uint8_t *dst_mac,
+		uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
+
+	// 1 ether
+	struct rte_ether_hdr *eth = (struct rte_ether_hdr *)msg;
+	rte_memcpy(eth->s_addr.addr_bytes, g_src_mac, RTE_ETHER_ADDR_LEN);
+	rte_memcpy(eth->d_addr.addr_bytes, dst_mac, RTE_ETHER_ADDR_LEN);
+	eth->ether_type = htons(RTE_ETHER_TYPE_IPV4);
+
+	// 2 ip
+	struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(msg + sizeof(struct rte_ether_hdr));
+	ip->version_ihl = 0x45;
+	ip->type_of_service = 0;
+	ip->total_length = htons(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr));
+	ip->packet_id = 0;
+	ip->fragment_offset = 0;
+	ip->time_to_live = 64; // ttl = 64
+	ip->next_proto_id = IPPROTO_ICMP;
+	ip->src_addr = sip;
+	ip->dst_addr = dip;
+	
+	ip->hdr_checksum = 0;
+	ip->hdr_checksum = rte_ipv4_cksum(ip);
+
+	// 3 icmp 
+	struct rte_icmp_hdr *icmp = (struct rte_icmp_hdr *)(msg + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr));
+	// 类型 
+    //icmp->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
+    icmp->icmp_type = 5;
+
+    // ICMP差错报文的类型
+	//icmp->icmp_code = 0;
+    icmp->icmp_code = 1;
+    // 标识符
+	icmp->icmp_ident = id;
+    // 序列号
+	icmp->icmp_seq_nb = seqnb;
+    
+    uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,31);
+
+	icmp->icmp_cksum = 0;
+	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr));
+
+    uint8_t* gateway = (uint8_t*)(icmp + 1);
+    rte_memcpy(gateway,&g_src_arp_ip,RTE_ETHER_ADDR_LEN);
+	return 0;
+}
+
+
+static struct rte_mbuf *ng_send_icmp(struct rte_mempool *mbuf_pool, uint8_t *dst_mac,
+		uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
+
+	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) +sizeof(u_int32_t);
+
+	struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mbuf_pool);
+	if (!mbuf) {
+		rte_exit(EXIT_FAILURE, "rte_pktmbuf_alloc\n");
+	}
+
+	
+	mbuf->pkt_len = total_length;
+	mbuf->data_len = total_length;
+
+	uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *);
+	ng_encode_icmp_pkt(pkt_data, dst_mac, sip, dip, id, seqnb);
+
+	return mbuf;
+
+}
+>>>>>>> temp
 // 程序入口
 int main(int argc, char* argv[])
 {
@@ -377,10 +477,10 @@ int main(int argc, char* argv[])
 
                 struct in_addr addr;
                 addr.s_addr = iphdr->src_addr;
-                printf("src :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->src_port));
+                //printf("src :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->src_port));
                 addr.s_addr = iphdr->dst_addr;
-                printf("dst :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->dst_port));
-                printf ("message :%s\n",(char *)(udphdr + 1));
+                //printf("dst :%s:%d\n",inet_ntoa(addr),  ntohs(udphdr->dst_port));
+                //printf ("message :%s\n",(char *)(udphdr + 1));
 
 
                 struct rte_mbuf *txbuf = send_udp_pack(mbuf_pool,(uint8_t *)(udphdr + 1), length);
@@ -404,8 +504,37 @@ int main(int argc, char* argv[])
             
             
 
+            if (iphdr->next_proto_id == IPPROTO_ICMP)
+            {
+				struct rte_icmp_hdr *icmphdr = (struct rte_icmp_hdr *)(iphdr + 1);
+
+				
+				struct in_addr addr;
+				addr.s_addr = iphdr->src_addr;
+				printf("icmp ---> src: %s ", inet_ntoa(addr));
+
+				
+				if (icmphdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) 
+                {
+
+					addr.s_addr = iphdr->dst_addr;
+					printf(" local: %s , type : %d\n", inet_ntoa(addr), icmphdr->icmp_type);
+				
+
+					struct rte_mbuf *txbuf = ng_send_icmp(mbuf_pool, ethhdr->s_addr.addr_bytes,
+						iphdr->dst_addr, iphdr->src_addr, icmphdr->icmp_ident, icmphdr->icmp_seq_nb);
+
+					rte_eth_tx_burst(g_dpdk_ifIndex, 0, &txbuf, 1);
+					rte_pktmbuf_free(txbuf);
+
+					rte_pktmbuf_free(mbufs[index]);
+				}                
+            }
+
         }
 
     }
     
 }
+
+// 172.20.4.33
