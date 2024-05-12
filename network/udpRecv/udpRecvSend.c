@@ -1,6 +1,7 @@
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
+#include <rte_icmp.h>
 
 
 #include <stdio.h>
@@ -38,7 +39,7 @@ static uint8_t g_src_mac[RTE_ETHER_ADDR_LEN];
 static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
 
 // UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
-static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,101);
+static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
 
 
 
@@ -238,6 +239,7 @@ static int build_arp_packet(uint8_t *msg, uint8_t* dst_mac, uint32_t src_ip, uin
     return 0;
 }
 
+
 // ARP本身的功能，接受和发送
 // ARP发起ARP查询,ARP发送ARP响应
 static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
@@ -258,6 +260,17 @@ static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool, uint8_t* ds
     build_arp_packet(pkt_data,dst_mac,src_ip,dst_ip);
     return mbuf;
 }
+
+
+// 收发ICMP数据包
+static struct rte_mbuf* send_icmp_pack(struct rte_mempool* mbuf_pool, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
+{
+    const unsigned total_len = sizeof(struct rte_ether_hdr) + sizeof(struct rte_icmp_hdr);
+    struct rte_mbuf* mbuf = rte_pktmbuf_alloc()
+}
+
+
+
 
 // 程序入口
 int main(int argc, char* argv[])
@@ -312,9 +325,8 @@ int main(int argc, char* argv[])
             // 以太网头
             struct rte_ether_hdr *ethhdr = rte_pktmbuf_mtod(mbufs[index], struct rte_ether_hdr*);
 
-
-            // 处理ARP数据包
             
+            // 处理ARP数据包
             if (ethhdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP))
             {
                 // 只处理广播过来和自己有关的数据包，其他人的数据包不处理
@@ -332,6 +344,8 @@ int main(int argc, char* argv[])
             }
 
             
+
+            
             // 判别非IPV4数据包，不做处理
             if (ethhdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
             {   
@@ -339,6 +353,9 @@ int main(int argc, char* argv[])
             }
             //buf_addr     data_off         useroff
             struct rte_ipv4_hdr* iphdr = rte_pktmbuf_mtod_offset(mbufs[index],struct rte_ipv4_hdr*, sizeof(struct rte_ether_hdr));
+
+
+
             if (iphdr->next_proto_id == IPPROTO_UDP)
             {
                 // 获取IP头 偏移量1=越过整个ip头，就指向了udp头
@@ -374,7 +391,18 @@ int main(int argc, char* argv[])
 
                 // 释放内存
                 rte_pktmbuf_free(mbufs[index]);
+            } 
+            else if (iphdr->next_proto_id  == IPPROTO_ICMP)
+            {
+                // 处理ICMP数据包
+                struct rte_icmp_hdr* icmp_hdr = (struct rte_icmp_hdr*)(iphdr + 1);
+                if (icmp_hdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST)
+                {
+
+                }
             }
+            
+            
 
         }
 
