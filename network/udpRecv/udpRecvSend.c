@@ -39,7 +39,7 @@ static uint8_t g_src_mac[RTE_ETHER_ADDR_LEN];
 static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
 
 // UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
-static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
+static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
 // 172.20.4.33
 // static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
 
@@ -283,7 +283,7 @@ static uint16_t ng_checksum(uint16_t *addr, int count) {
 	return ~sum;
 }
 
-static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
+static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb, uint8_t* data) {
 
 	// 1 ether
 	struct rte_ether_hdr *eth = (struct rte_ether_hdr *)msg;
@@ -295,7 +295,7 @@ static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint3
 	struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(msg + sizeof(struct rte_ether_hdr));
 	ip->version_ihl = 0x45;
 	ip->type_of_service = 0;
-	ip->total_length = htons(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr));
+	ip->total_length = htons(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) +sizeof(uint32_t));
 	ip->packet_id = 0;
 	ip->fragment_offset = 0;
 	ip->time_to_live = 64; // ttl = 64
@@ -318,16 +318,36 @@ static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint3
     // 序列号
 	icmp->icmp_seq_nb = seqnb;
 
-	icmp->icmp_cksum = 0;
-	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr));
 
+
+
+    // 4 gateway
+    uint32_t *gateway =  (uint32_t *)(msg + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr));
+    uint32_t baidu = MAKE_IPVE_ADDR(110,242,68,66);
+    rte_memcpy(gateway,&baidu,sizeof(uint32_t));
+
+
+    // 拷贝28字节
+    uint8_t *dataIcmp = (uint8_t *)(msg + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) + sizeof(uint32_t));
+    // 5. IP报文
+    rte_memcpy(dataIcmp,data,sizeof(uint8_t)*28);
+
+    // 6.ICMP报文
+	icmp->icmp_cksum = 0;
+	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr) + sizeof(uint32_t) + sizeof(uint8_t)*28);
+
+    struct in_addr addr;
+	addr.s_addr = sip;
+    printf("src: %s\n", inet_ntoa(addr));
+    addr.s_addr = dip;
+    printf("dst: %s\n", inet_ntoa(addr));
 	return 0;
 }
 
 
-static struct rte_mbuf *send_icmp_pack(struct rte_mempool *mbuf_pool, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
+static struct rte_mbuf *send_icmp_pack(struct rte_mempool *mbuf_pool, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb, uint8_t* data) {
 
-	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr);
+	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) +sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) +sizeof(uint32_t) + sizeof(uint8_t)*28;
 
 	struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mbuf_pool);
 	if (!mbuf) {
@@ -339,7 +359,7 @@ static struct rte_mbuf *send_icmp_pack(struct rte_mempool *mbuf_pool, uint8_t *d
 	mbuf->data_len = total_length;
 
 	uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *);
-	build_icmp_packet(pkt_data, dst_mac, sip, dip, id, seqnb);
+	build_icmp_packet(pkt_data, dst_mac, sip, dip, id, seqnb,data);
 
 	return mbuf;
 }
@@ -375,6 +395,7 @@ int main(int argc, char* argv[])
     // 初始化网卡,启动DPDK
     ifIndex_init(mbuf_pool);
     rte_eth_macaddr_get(g_dpdk_ifIndex,(struct rte_ether_addr* )g_src_mac);
+    
 
     // 网络收发流程
     while (1)
@@ -465,16 +486,6 @@ int main(int argc, char* argv[])
                 // 释放内存
                 rte_pktmbuf_free(mbufs[index]);
             } 
-            else if (iphdr->next_proto_id  == IPPROTO_ICMP)
-            {
-                // 处理ICMP数据包
-                struct rte_icmp_hdr* icmp_hdr = (struct rte_icmp_hdr*)(iphdr + 1);
-                if (icmp_hdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST)
-                {
-
-                }
-            }
-            
             
 
             if (iphdr->next_proto_id == IPPROTO_ICMP)
@@ -493,8 +504,8 @@ int main(int argc, char* argv[])
 					addr.s_addr = iphdr->dst_addr;
 					printf(" local: %s , type : %d\n", inet_ntoa(addr), icmphdr->icmp_type);
 				
-
-					struct rte_mbuf *txbuf = send_icmp_pack(mbuf_pool, ethhdr->s_addr.addr_bytes, iphdr->dst_addr, iphdr->src_addr, icmphdr->icmp_ident, icmphdr->icmp_seq_nb);
+                    uint8_t *data = (uint8_t*)(iphdr);
+					struct rte_mbuf *txbuf = send_icmp_pack(mbuf_pool, ethhdr->s_addr.addr_bytes, iphdr->dst_addr, iphdr->src_addr, icmphdr->icmp_ident, icmphdr->icmp_seq_nb, data);
 					rte_eth_tx_burst(g_dpdk_ifIndex, 0, &txbuf, 1);
 					rte_pktmbuf_free(txbuf);
 
