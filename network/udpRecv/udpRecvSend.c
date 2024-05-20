@@ -9,6 +9,100 @@
 #include <net/ethernet.h>
 
 
+#include <rte_malloc.h>
+
+
+// ARP表 ARP规则定义
+#define ARP_ENTRY_STATUS_DYNAMIC 0
+#define ARP_ENTRY_STATUS_STATIC 1
+
+
+// ARP表数据结构
+struct arp_entry 
+{
+    uint32_t ip;
+    uint8_t hwaddr[RTE_ETHER_ADDR_LEN];
+    // 动态静态
+    uint8_t type;
+    // 内存没有对齐
+
+
+    // 双向链表
+    struct arp_entry *next;
+    struct arp_entry *prev;
+};
+
+// ARP表
+struct arp_table 
+{
+    struct arp_entry *entries;
+    int count;
+};
+
+
+// 添加和删除
+#define LL_ADD(item, list) do { \
+    item ->prev = NULL; \
+    item ->next =list; \
+    if (list != NULL) list->prev = item;\
+    list = item; \
+} while (0)
+
+#define LL_REMOVE(item, list) do { \
+    if (item->prev != NULL) item->prev->next = item->next; \
+    if (item->next != NULL) item->next->prev = item->prev; \
+    if (list == item) list = item->next; \
+    item->prev = item->next; \
+} while(0) 
+
+// 单例模式ARP
+static struct arp_table *arpt = NULL;
+static struct arp_table *arp_table_instance (void)
+{
+    if (arpt == NULL)
+    {
+        // name size 对齐
+        arpt = rte_malloc("arp_table", sizeof(struct arp_table), 0);
+        if (arpt == NULL)
+        {
+            rte_exit(EXIT_FAILURE, "ARPTable Create Memory Error");
+        }
+        memset(arpt, 0, sizeof(struct arp_table));
+    }
+
+    return arpt;
+}
+
+
+// 获取目标MAC地址
+static uint8_t* get_dst_mac(uint32_t dip)
+{
+    // ARP数据迭代器
+    struct arp_entry *iter;
+    // ARP数据表表头
+    struct arp_table *table = arp_table_instance();
+
+    // 遍历本地ARP解析表
+    for (iter = table->entries; iter != NULL; iter = iter->next)
+    {
+        if (dip == iter->hwaddr)
+        {
+            return iter->hwaddr;
+        }
+    }
+    return NULL;
+}
+
+// 打印MAC地址
+static inline void print_mac(const char* what, const struct rte_ether_addr* eth_addr)
+{
+    // what 固定输出在屏幕上的内容, 
+    // MAC地址 (struct rte_ether_addr*) uint8
+    char buf[RTE_ETHER_ADDR_FMT_SIZE];
+    rte_ether_format_addr(buf,RTE_ETHER_ADDR_FMT_SIZE,eth_addr);
+    printf("%s%s",what,buf);
+}
+
 // 计算IP的宏定义
 #define MAKE_IPVE_ADDR(a,b,c,d)(a + (b<<8) + (c<<16) + (d<<24))
 
@@ -408,10 +502,35 @@ int main(int argc, char* argv[])
                 // 比对本身的IP
                 if (arp_hdr->arp_data.arp_tip == g_src_arp_ip)
                 {
-                    struct rte_mbuf* arpbuf = send_arp_pack(mbuf_pool,arp_hdr->arp_data.arp_sha.addr_bytes,arp_hdr->arp_data.arp_tip,arp_hdr->arp_data.arp_sip);
-                    rte_eth_tx_burst(g_dpdk_ifIndex,0,&arpbuf,1);
-                    rte_pktmbuf_free(arpbuf);
-                    rte_pktmbuf_free(mbufs[index]);
+                    // 分别处理ARP发送和接受的数据包
+                    if (arp_hdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST))
+                    {
+                        // 收到ARP请求，发送响应
+                        struct rte_mbuf* arpbuf = send_arp_pack(mbuf_pool,arp_hdr->arp_data.arp_sha.addr_bytes,arp_hdr->arp_data.arp_tip,arp_hdr->arp_data.arp_sip);
+                        rte_eth_tx_burst(g_dpdk_ifIndex,0,&arpbuf,1);
+                        rte_pktmbuf_free(arpbuf);
+                        rte_pktmbuf_free(mbufs[index]);
+                    }
+                    else if (arp_hdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY))
+                    {
+                        // 收到ARP响应，查看自己ARP表中是否存在数据
+                        uint8_t* hwaddr =  get_dst_mac(arp_hdr->arp_data.arp_sip);
+                        if (hwaddr == NULL)
+                        {
+                            struct arp_table* table = arp_table_instance();
+                            struct arp_entry* entry = rte_malloc("arp entry", sizeof(struct arp_entry),0);
+                            if (entry)
+                            {
+                                memset(entry, 0, sizeof(struct arp_entry));
+                                entry->ip = arp_hdr->arp_data.arp_sip;
+                                rte_memcpy(entry->hwaddr, arp_hdr->arp_data.arp_sha.addr_bytes, RTE_ETHER_ADDR_LEN);
+                                entry->type = ARP_ENTRY_STATUS_DYNAMIC;
+                                LL_ADD(entry,table->entries);
+                                table->count ++;
+                            }
+                        }
+                    }
+
                 }
                 continue;
             }
@@ -465,17 +584,6 @@ int main(int argc, char* argv[])
                 // 释放内存
                 rte_pktmbuf_free(mbufs[index]);
             } 
-            else if (iphdr->next_proto_id  == IPPROTO_ICMP)
-            {
-                // 处理ICMP数据包
-                struct rte_icmp_hdr* icmp_hdr = (struct rte_icmp_hdr*)(iphdr + 1);
-                if (icmp_hdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST)
-                {
-
-                }
-            }
-            
-            
 
             if (iphdr->next_proto_id == IPPROTO_ICMP)
             {
