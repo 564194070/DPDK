@@ -2,7 +2,7 @@
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_icmp.h>
-
+#include <rte_timer.h>
 
 #include <stdio.h>
 #include <arpa/inet.h>
@@ -11,6 +11,9 @@
 
 #include <rte_malloc.h>
 
+// 10ms*10000*12 一分钟
+#define TIMER_RESOLUTION_CYCLES 20000000000ULL
+#define TIME_RESOLUTION_CYCLES 20000000000ULL
 
 // ARP表 ARP规则定义
 #define ARP_ENTRY_STATUS_DYNAMIC 0
@@ -85,12 +88,20 @@ static uint8_t* get_dst_mac(uint32_t dip)
     // 遍历本地ARP解析表
     for (iter = table->entries; iter != NULL; iter = iter->next)
     {
-        if (dip == iter->hwaddr)
+        if (dip == iter->ip)
         {
             return iter->hwaddr;
         }
     }
     return NULL;
+}
+
+static void 
+print_ethaddr(const char *name, const struct rte_ether_addr *eth_addr)
+{
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
+	rte_ether_format_addr(buf, RTE_ETHER_ADDR_FMT_SIZE, eth_addr);
+	printf("%s%s", name, buf);
 }
 
 // 打印MAC地址
@@ -131,6 +142,9 @@ static uint32_t g_dst_ip;
 
 static uint8_t g_src_mac[RTE_ETHER_ADDR_LEN];
 static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
+
+static uint8_t g_default_arp_mac[RTE_ETHER_ADDR_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint8_t g_default_eth_mac[RTE_ETHER_ADDR_LEN] = {0x00};
 
 // UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
 static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
@@ -297,14 +311,25 @@ static struct rte_mbuf* send_udp_pack(struct rte_mempool *mbuf_pool, uint8_t* da
 
 
 
-static int build_arp_packet(uint8_t *msg, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
+static int build_arp_packet(uint8_t *msg,uint16_t opcode, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
 {
     // 以太网头
     struct rte_ether_hdr *ethhdr = (struct rte_ether_hdr*)msg;
     // 源IP地址
-    rte_memcpy(ethhdr->s_addr.addr_bytes, g_src_mac, RTE_ETHER_ADDR_LEN);
+    rte_memcpy(ethhdr->s_addr.addr_bytes, g_src_arp_ip, RTE_ETHER_ADDR_LEN);
+
     // 目的IP地址
-    rte_memcpy(ethhdr->d_addr.addr_bytes, dst_mac, RTE_ETHER_ADDR_LEN);
+    if (!strncmp ((const char*)dst_mac, (const char*)g_default_arp_mac, RTE_ETHER_ADDR_LEN))
+    {
+        // 每一位都是1,代表是没有ARP地址的信息
+        rte_memcpy(ethhdr->d_addr.addr_bytes, g_default_eth_mac, RTE_ETHER_ADDR_LEN);
+    }
+    else
+    {
+        rte_memcpy(ethhdr->d_addr.addr_bytes, dst_mac, RTE_ETHER_ADDR_LEN);
+    }
+    
+
     ethhdr->ether_type = htons(RTE_ETHER_TYPE_ARP);
 
 
@@ -319,7 +344,7 @@ static int build_arp_packet(uint8_t *msg, uint8_t* dst_mac, uint32_t src_ip, uin
     // 软件地址长度
     arp->arp_plen = sizeof(uint32_t);
     // 软件操作长度 (请求1和返回2)
-    arp->arp_opcode = htons(2);
+    arp->arp_opcode = htons(opcode);
 
     // 源IP地址
     rte_memcpy(arp->arp_data.arp_sha.addr_bytes, g_src_mac,RTE_ETHER_ADDR_LEN);
@@ -334,7 +359,7 @@ static int build_arp_packet(uint8_t *msg, uint8_t* dst_mac, uint32_t src_ip, uin
 
 // ARP本身的功能，接受和发送
 // ARP发起ARP查询,ARP发送ARP响应
-static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool, uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
+static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool,uint16_t opcode , uint8_t* dst_mac, uint32_t src_ip, uint32_t dst_ip)
 {
     // 14字节以太网
     // 28字节ARP
@@ -349,7 +374,7 @@ static struct rte_mbuf* send_arp_pack(struct rte_mempool* mbuf_pool, uint8_t* ds
     mbuf->pkt_len = total_len;
     mbuf->data_len = total_len;
     uint8_t* pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t*);
-    build_arp_packet(pkt_data,dst_mac,src_ip,dst_ip);
+    build_arp_packet(pkt_data,opcode,dst_mac,src_ip,dst_ip);
     return mbuf;
 }
 
@@ -438,6 +463,43 @@ static struct rte_mbuf *send_icmp_pack(struct rte_mempool *mbuf_pool, uint8_t *d
 	return mbuf;
 }
 
+// 定时器
+// 定时器回调 参数定时器和需要回调的参数
+static void arp_request_timer_cb (__attribute__((unused)) struct rte_timer* tim, __attribute__((unused)) void* arg)
+{
+    struct rte_mempool* mbuf_pool = (struct rte_mempool*)arg;
+    struct rte_mbuf* arpbuf = NULL ;
+    //rte_eth_tx_burst(g_dpdk_ifIndex,0,&arpbuf,1);
+    //rte_pktmbuf_free(arpbuf);
+
+    for (int index = 1; index < 254; ++index)
+    {
+        uint32_t dstip = (g_src_arp_ip & 0x00FFFFFF) | (0xFF000000 & (index << 24));
+        struct in_addr addr;
+        addr.s_addr = dstip;
+        //printf(" --> arp send: %s\n", inet_ntoa(addr));
+        addr.s_addr = g_src_arp_ip;
+        //printf(" --> arp src send: %s\n", inet_ntoa(addr));
+        uint8_t* dstmac =  get_dst_mac(dstip);
+        if (dstmac == NULL)
+        {
+            // ARP表找不到内容，就发这样
+            // arphdr -> mac :  FF:FF:FF:FF:FF:FF
+            // ether -> mac:    00:00:00:00:00:00
+            arpbuf = send_arp_pack(mbuf_pool, RTE_ARP_OP_REQUEST,g_default_arp_mac ,g_src_arp_ip,dstip);
+        }
+        else
+        {
+            // 能找到ARP信息
+            arpbuf = send_arp_pack(mbuf_pool, RTE_ARP_OP_REQUEST, dstmac ,g_src_arp_ip,dstip);
+        }
+        rte_eth_tx_burst(g_dpdk_ifIndex,0,&arpbuf,1);
+        rte_pktmbuf_free(arpbuf);
+    }
+
+
+}
+
 
 // 程序入口
 int main(int argc, char* argv[])
@@ -465,11 +527,28 @@ int main(int argc, char* argv[])
         rte_exit(EXIT_FAILURE, "Could Not Create Buffer\n");
     }
 
-
+    
     // 初始化网卡,启动DPDK
     ifIndex_init(mbuf_pool);
     rte_eth_macaddr_get(g_dpdk_ifIndex,(struct rte_ether_addr* )g_src_mac);
 
+    // 初始化定时器
+    rte_timer_subsystem_init();
+    struct rte_timer arp_timer;
+    rte_timer_init(&arp_timer);
+
+    // 设置定时器频率
+    uint64_t  hz = rte_get_timer_hz();
+    unsigned lcore_id = rte_lcore_id();
+    // PERIODICAL 循环触发 SINGLE 单次触发
+    // 设置了，但是没有调用
+    rte_timer_reset(&arp_timer,hz,PERIODICAL,lcore_id,arp_request_timer_cb,mbuf_pool);
+
+
+    static uint64_t prev_tsc = 0;
+    static uint64_t cur_tsc;
+    uint64_t diff_tsc;
+    
     // 网络收发流程
     while (1)
     {
@@ -500,13 +579,16 @@ int main(int argc, char* argv[])
                 // 解析出来ARP头
                 struct rte_arp_hdr* arp_hdr = rte_pktmbuf_mtod_offset(mbufs[index], struct rte_arp_hdr*,sizeof(struct rte_ether_hdr));
                 // 比对本身的IP
+				struct in_addr addr;
+				addr.s_addr = arp_hdr->arp_data.arp_tip;
+				printf("arp ---> src: %s ", inet_ntoa(addr));
                 if (arp_hdr->arp_data.arp_tip == g_src_arp_ip)
                 {
                     // 分别处理ARP发送和接受的数据包
                     if (arp_hdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST))
                     {
                         // 收到ARP请求，发送响应
-                        struct rte_mbuf* arpbuf = send_arp_pack(mbuf_pool,arp_hdr->arp_data.arp_sha.addr_bytes,arp_hdr->arp_data.arp_tip,arp_hdr->arp_data.arp_sip);
+                        struct rte_mbuf* arpbuf = send_arp_pack(mbuf_pool,RTE_ARP_OP_REPLY,arp_hdr->arp_data.arp_sha.addr_bytes,arp_hdr->arp_data.arp_tip,arp_hdr->arp_data.arp_sip);
                         rte_eth_tx_burst(g_dpdk_ifIndex,0,&arpbuf,1);
                         rte_pktmbuf_free(arpbuf);
                         rte_pktmbuf_free(mbufs[index]);
@@ -514,10 +596,12 @@ int main(int argc, char* argv[])
                     else if (arp_hdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY))
                     {
                         // 收到ARP响应，查看自己ARP表中是否存在数据
+                        printf("resopnse!\n");
+                        struct arp_table* table = arp_table_instance();
                         uint8_t* hwaddr =  get_dst_mac(arp_hdr->arp_data.arp_sip);
                         if (hwaddr == NULL)
                         {
-                            struct arp_table* table = arp_table_instance();
+                            
                             struct arp_entry* entry = rte_malloc("arp entry", sizeof(struct arp_entry),0);
                             if (entry)
                             {
@@ -527,6 +611,10 @@ int main(int argc, char* argv[])
                                 entry->type = ARP_ENTRY_STATUS_DYNAMIC;
                                 LL_ADD(entry,table->entries);
                                 table->count ++;
+                                struct in_addr addr;
+                                addr.s_addr = entry->ip;
+                                print_ethaddr("mac ->",(struct rte_ether_addr *)entry->hwaddr);
+                                printf(" --> arp send: %s\n", inet_ntoa(addr));
                             }
                         }
                     }
@@ -611,7 +699,28 @@ int main(int argc, char* argv[])
             }
 
         }
+        // 每一轮大循环，触发一次定时器任务
+        // cur当前时间,prev上次触发时间，求差值
 
+        cur_tsc =  rte_rdtsc();
+        diff_tsc = cur_tsc - prev_tsc;
+        if (diff_tsc > TIMER_RESOLUTION_CYCLES)
+        {
+            rte_timer_manage();
+            prev_tsc = cur_tsc;
+        }
+        
+        /*
+		static uint64_t prev_tsc = 0, cur_tsc;
+		uint64_t diff_tsc;
+
+		cur_tsc = rte_rdtsc();
+		diff_tsc = cur_tsc - prev_tsc;
+		if (diff_tsc > TIMER_RESOLUTION_CYCLES) {
+			rte_timer_manage();
+			prev_tsc = cur_tsc;
+		}
+        */
     }
     
 }
