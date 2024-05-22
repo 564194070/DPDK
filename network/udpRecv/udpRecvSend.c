@@ -147,9 +147,9 @@ static uint8_t g_default_arp_mac[RTE_ETHER_ADDR_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 
 static uint8_t g_default_eth_mac[RTE_ETHER_ADDR_LEN] = {0x00};
 
 // UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
-static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
+// static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
 // 172.20.4.33
-// static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
+static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
 
 
 
@@ -316,10 +316,10 @@ static int build_arp_packet(uint8_t *msg,uint16_t opcode, uint8_t* dst_mac, uint
     // 以太网头
     struct rte_ether_hdr *ethhdr = (struct rte_ether_hdr*)msg;
     // 源IP地址
-    rte_memcpy(ethhdr->s_addr.addr_bytes, g_src_arp_ip, RTE_ETHER_ADDR_LEN);
+    rte_memcpy(ethhdr->s_addr.addr_bytes, g_src_mac, RTE_ETHER_ADDR_LEN);
 
     // 目的IP地址
-    if (!strncmp ((const char*)dst_mac, (const char*)g_default_arp_mac, RTE_ETHER_ADDR_LEN))
+    if (strncmp ((const char*)dst_mac, (const char*)g_default_arp_mac, RTE_ETHER_ADDR_LEN))
     {
         // 每一位都是1,代表是没有ARP地址的信息
         rte_memcpy(ethhdr->d_addr.addr_bytes, g_default_eth_mac, RTE_ETHER_ADDR_LEN);
@@ -352,7 +352,6 @@ static int build_arp_packet(uint8_t *msg,uint16_t opcode, uint8_t* dst_mac, uint
     rte_memcpy(arp->arp_data.arp_tha.addr_bytes, dst_mac,RTE_ETHER_ADDR_LEN);
     arp->arp_data.arp_sip = src_ip;
     arp->arp_data.arp_tip = dst_ip;
-
     return 0;
 }
 
