@@ -52,9 +52,9 @@ static uint8_t g_dst_mac[RTE_ETHER_ADDR_LEN];
 
 
 // UDP接受的广播信息IP变成广播地址，为了避免ARP受影响，从新生成变量
-// static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,102);
+ static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(192,168,18,103);
 // 172.20.4.33
-static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
+// static uint32_t g_src_arp_ip = MAKE_IPVE_ADDR(172,20,4,33);
 
 
 
@@ -342,14 +342,7 @@ static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint3
     // 序列号
 	icmp->icmp_seq_nb = seqnb;
 
-
-
-    //if (data_len > 0)
-    //{
-        rte_memcpy((uint8_t*)(icmp + sizeof(struct rte_icmp_hdr)), data, data_len);
-    //}
-    uint8_t *test = (uint8_t*)(icmp + sizeof(struct rte_icmp_hdr));
-
+    rte_memcpy((uint8_t*)(icmp + 1), data, data_len);
 
 	icmp->icmp_cksum = 0;
 	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr)+data_len);
@@ -636,7 +629,6 @@ static int pkt_process(void *arg)
                     struct rte_icmp_hdr *icmphdr = (struct rte_icmp_hdr *)(iphdr + 1);
                     printf("接收到icmp报文 --->");
                     uint8_t *data = (uint8_t *)(icmphdr + 1);
-                    uint8_t *datatest = (uint8_t *)(iphdr + 1);
 
                     if (icmphdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST)
                     {
