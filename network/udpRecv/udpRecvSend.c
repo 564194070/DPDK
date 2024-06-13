@@ -307,7 +307,7 @@ static uint16_t ng_checksum(uint16_t *addr, int count) {
 	return ~sum;
 }
 
-static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
+static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb, uint8_t* data, uint8_t data_len) {
 
 	// 1 ether
 	struct rte_ether_hdr *eth = (struct rte_ether_hdr *)msg;
@@ -319,7 +319,7 @@ static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint3
 	struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(msg + sizeof(struct rte_ether_hdr));
 	ip->version_ihl = 0x45;
 	ip->type_of_service = 0;
-	ip->total_length = htons(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr));
+	ip->total_length = htons(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr)+ data_len);
 	ip->packet_id = 0;
 	ip->fragment_offset = 0;
 	ip->time_to_live = 64; // ttl = 64
@@ -342,28 +342,36 @@ static int build_icmp_packet(uint8_t *msg, uint8_t *dst_mac, uint32_t sip, uint3
     // 序列号
 	icmp->icmp_seq_nb = seqnb;
 
+
+
+    //if (data_len > 0)
+    //{
+        rte_memcpy((uint8_t*)(icmp + sizeof(struct rte_icmp_hdr)), data, data_len);
+    //}
+    uint8_t *test = (uint8_t*)(icmp + sizeof(struct rte_icmp_hdr));
+
+
 	icmp->icmp_cksum = 0;
-	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr));
+	icmp->icmp_cksum = ng_checksum((uint16_t*)icmp, sizeof(struct rte_icmp_hdr)+data_len);
 
 	return 0;
 }
 
 
-static struct rte_mbuf *send_icmp_pack(struct rte_mempool *mbuf_pool, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb) {
+static struct rte_mbuf *send_icmp_pack(struct rte_mempool *mbuf_pool, uint8_t *dst_mac, uint32_t sip, uint32_t dip, uint16_t id, uint16_t seqnb, uint8_t* data, uint16_t data_len) {
 
-	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr);
+	const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr) + data_len;
 
 	struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mbuf_pool);
 	if (!mbuf) {
 		rte_exit(EXIT_FAILURE, "rte_pktmbuf_alloc\n");
 	}
-
 	
 	mbuf->pkt_len = total_length;
 	mbuf->data_len = total_length;
 
-	uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *);
-	build_icmp_packet(pkt_data, dst_mac, sip, dip, id, seqnb);
+	uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *); 
+	build_icmp_packet(pkt_data, dst_mac, sip, dip, id, seqnb, data, data_len);
 
 	return mbuf;
 }
@@ -546,7 +554,7 @@ static int pkt_process(void *arg)
         for (unsigned index = 0; index < recv_package; ++index)
         {
             //分析一层报头
-            printf("接收到数据包\n");
+            //printf("接收到数据包\n");
             struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(mbufs[index], struct rte_ether_hdr*);
 
             // 辨别二层协议
@@ -627,12 +635,17 @@ static int pkt_process(void *arg)
                     // 处理ICMP报头
                     struct rte_icmp_hdr *icmphdr = (struct rte_icmp_hdr *)(iphdr + 1);
                     printf("接收到icmp报文 --->");
+                    uint8_t *data = (uint8_t *)(icmphdr + 1);
+                    uint8_t *datatest = (uint8_t *)(iphdr + 1);
 
                     if (icmphdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST)
                     {
+                        uint16_t data_len = ntohs(iphdr->total_length) - sizeof(struct rte_ipv4_hdr) - sizeof(struct rte_icmp_hdr);
+                        printf("数据长度为%d,ip头长度为:%ld,icmp头长度为%ld\n",ntohs(iphdr->total_length), sizeof(struct rte_ipv4_hdr), sizeof(struct rte_icmp_hdr));
+                        
                         struct rte_mbuf *txbuf = send_icmp_pack(mbuf_pool, eth_hdr->s_addr.addr_bytes,
-						iphdr->dst_addr, iphdr->src_addr, icmphdr->icmp_ident, icmphdr->icmp_seq_nb);
-
+						iphdr->dst_addr, iphdr->src_addr, icmphdr->icmp_ident, icmphdr->icmp_seq_nb,data,data_len);
+                        
                         rte_ring_mp_enqueue_burst(ring->out, (void**)&txbuf, 1, NULL);
                         rte_pktmbuf_free(mbufs[index]);
                     }
